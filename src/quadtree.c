@@ -3,17 +3,24 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 两个矩形是否相交。接触（边贴边、角贴角）算相交。 */
+/* 两个矩形是否相交。接触（边贴边、角贴角）算相交：
+   只有严格分离（>）才算不相交。 */
 static int rect_intersects(Rect a, Rect b) {
-    if (a.x >= b.x + b.w) return 0;
-    if (b.x >= a.x + a.w) return 0;
-    if (a.y >= b.y + b.h) return 0;
-    if (b.y >= a.y + a.h) return 0;
+    if (a.x > b.x + b.w) return 0;
+    if (b.x > a.x + a.w) return 0;
+    if (a.y > b.y + b.h) return 0;
+    if (b.y > a.y + a.h) return 0;
     return 1;
 }
 
 int rect_intersects_public(Rect a, Rect b) {
     return rect_intersects(a, b);
+}
+
+/* r 是否完整包含 item（贴边也算包含）。 */
+static int rect_contains_rect(Rect r, Rect item) {
+    return item.x >= r.x && item.x + item.w <= r.x + r.w && item.y >= r.y &&
+           item.y + item.h <= r.y + r.h;
 }
 
 static int rect_contains_point(Rect r, float px, float py) {
@@ -40,19 +47,42 @@ static void node_free(QuadNode *n) {
     free(n);
 }
 
-static void node_split(QuadNode *n) {
+/* 往节点本地数组追加一个元素，容量不够就扩容。失败返回 0。 */
+static int node_add_item(QuadNode *n, QuadItem item) {
+    if (n->count >= QT_NODE_CAPACITY) {
+        QuadItem *grown =
+            (QuadItem *)realloc(n->items, sizeof(QuadItem) * (size_t)(n->count + 1));
+        if (!grown) return 0;
+        n->items = grown;
+    }
+    n->items[n->count++] = item;
+    return 1;
+}
+
+/* 分裂出四个子节点。任一分配失败则回滚，返回 0。 */
+static int node_split(QuadNode *n) {
     float hw = n->bounds.w * 0.5f;
     float hh = n->bounds.h * 0.5f;
-    n->children[0] = node_new((Rect){n->bounds.x, n->bounds.y, hw, hh}, n->depth + 1);
-    n->children[1] = node_new((Rect){n->bounds.x + hw, n->bounds.y, hw, hh}, n->depth + 1);
-    n->children[2] = node_new((Rect){n->bounds.x, n->bounds.y + hh, hw, hh}, n->depth + 1);
-    n->children[3] = node_new((Rect){n->bounds.x + hw, n->bounds.y + hh, hw, hh}, n->depth + 1);
+    QuadNode *c[4];
+    c[0] = node_new((Rect){n->bounds.x, n->bounds.y, hw, hh}, n->depth + 1);
+    c[1] = node_new((Rect){n->bounds.x + hw, n->bounds.y, hw, hh}, n->depth + 1);
+    c[2] = node_new((Rect){n->bounds.x, n->bounds.y + hh, hw, hh}, n->depth + 1);
+    c[3] = node_new((Rect){n->bounds.x + hw, n->bounds.y + hh, hw, hh}, n->depth + 1);
+    for (int i = 0; i < 4; i++) {
+        if (!c[i]) {
+            for (int k = 0; k < 4; k++) node_free(c[k]);
+            return 0;
+        }
+    }
+    for (int i = 0; i < 4; i++) n->children[i] = c[i];
+    return 1;
 }
 
 static int node_insert(QuadNode *n, QuadItem item, int max_depth);
 
-/* 把节点里已存的元素下沉到子节点；全部成功返回 1。 */
-static int node_push_down(QuadNode *n, int max_depth) {
+/* 分裂后把节点里已存的元素重新归位：能被某个子节点完整容纳的下沉，
+   跨切分线的留在本节点。 */
+static void node_redistribute(QuadNode *n, int max_depth) {
     QuadItem existing[QT_NODE_CAPACITY];
     int n_existing = n->count;
     memcpy(existing, n->items, sizeof(QuadItem) * (size_t)n_existing);
@@ -60,42 +90,34 @@ static int node_push_down(QuadNode *n, int max_depth) {
     for (int k = 0; k < n_existing; k++) {
         node_insert(n, existing[k], max_depth);
     }
-    return 1;
 }
 
 static int node_insert(QuadNode *n, QuadItem item, int max_depth) {
     if (!rect_intersects(n->bounds, item.rect)) return 0;
 
-    int has_children = n->children[0] != NULL;
-
-    if (!has_children && n->count < QT_NODE_CAPACITY) {
-        n->items[n->count++] = item;
-        return 1;
-    }
-
-    if (!has_children && n->depth >= max_depth) {
-        /* 到深度上限：节点内溢出存放。 */
-        if (n->count >= QT_NODE_CAPACITY * 2) return 0;
-        QuadItem *grown = (QuadItem *)realloc(n->items, sizeof(QuadItem) * (size_t)(n->count + 1));
-        if (!grown) return 0;
-        n->items = grown;
-        n->items[n->count++] = item;
-        return 1;
-    }
-
-    if (!has_children) {
-        node_split(n);
-        if (!n->children[0]) return 0;
-        if (!node_push_down(n, max_depth)) return 0;
-    }
-
-    for (int i = 0; i < 4; i++) {
-        if (!n->children[i]) continue;
-        if (rect_intersects(n->children[i]->bounds, item.rect)) {
-            if (node_insert(n->children[i], item, max_depth)) return 1;
+    if (n->children[0]) {
+        /* 已有子节点：只有被某个子节点完整容纳才下沉，
+           否则留在本节点，保证每个元素只存一份。 */
+        for (int i = 0; i < 4; i++) {
+            if (n->children[i] && rect_contains_rect(n->children[i]->bounds, item.rect)) {
+                return node_insert(n->children[i], item, max_depth);
+            }
         }
+        return node_add_item(n, item);
     }
-    return 0;
+
+    /* 叶子：容量未满，或已到深度上限（溢出存放，不丢元素）。 */
+    if (n->count < QT_NODE_CAPACITY || n->depth >= max_depth) {
+        return node_add_item(n, item);
+    }
+
+    /* 容量已满且未到深度上限：分裂后重新归位，再插入新元素。
+       分裂失败（内存不足）时退化为节点内溢出存放。 */
+    if (!node_split(n)) {
+        return node_add_item(n, item);
+    }
+    node_redistribute(n, max_depth);
+    return node_insert(n, item, max_depth);
 }
 
 static void node_query(QuadNode *n, Rect area, int *out, int max, int *count) {
