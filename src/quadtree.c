@@ -5,10 +5,10 @@
 
 /* 两个矩形是否相交。接触（边贴边、角贴角）算相交。 */
 static int rect_intersects(Rect a, Rect b) {
-    if (a.x >= b.x + b.w) return 0;
-    if (b.x >= a.x + a.w) return 0;
-    if (a.y >= b.y + b.h) return 0;
-    if (b.y >= a.y + a.h) return 0;
+    if (a.x > b.x + b.w) return 0;
+    if (b.x > a.x + a.w) return 0;
+    if (a.y > b.y + b.h) return 0;
+    if (b.y > a.y + a.h) return 0;
     return 1;
 }
 
@@ -58,7 +58,7 @@ static int node_push_down(QuadNode *n, int max_depth) {
     memcpy(existing, n->items, sizeof(QuadItem) * (size_t)n_existing);
     n->count = 0;
     for (int k = 0; k < n_existing; k++) {
-        node_insert(n, existing[k], max_depth);
+        if (!node_insert(n, existing[k], max_depth)) return 0;
     }
     return 1;
 }
