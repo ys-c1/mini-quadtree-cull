@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* 两个矩形是否相交。接触（边贴边、角贴角）算相交。 */
 static int rect_intersects(Rect a, Rect b) {
